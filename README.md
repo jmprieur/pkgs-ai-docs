@@ -47,10 +47,12 @@ dotnet build
 dotnet-pkgs-ai-docs deps ./packages/ -o ./output/
 ```
 
-For each package and target framework, generates:
-- Mermaid dependency diagram
+For each target framework, generates a `dependencies-{tfm}.md` file containing:
+- Mermaid dependency diagram per package
 - Classified dependency list (1P vs external)
 - Version constraints
+
+Output files: `dependencies-net8.0.md`, `dependencies-net9.0.md`, etc.
 
 ### Public API surface
 
@@ -58,9 +60,11 @@ For each package and target framework, generates:
 dotnet-pkgs-ai-docs api ./packages/ -o ./output/
 ```
 
-For each package and target framework, generates:
-- Every public namespace, type, and member
+For each target framework, generates a `public-api-{tfm}.md` file containing:
+- Every public namespace, type, and member per package
 - Roslyn `PublicAPI.Shipped.txt` format (one member per line, fully qualified, sorted)
+
+Output files: `public-api-net8.0.md`, `public-api-net9.0.md`, etc.
 
 ### Both at once
 
@@ -99,52 +103,53 @@ dotnet-pkgs-ai-docs deps ./packages/ -o ./output/ \
 
 ## Example output
 
-### Dependency graph (Markdown + Mermaid)
+See the [samples/](samples/) folder for full output generated from .NET Aspire 13.3.0-dev packages.
+
+### Dependency graph (`dependencies-net8.0.md` excerpt)
 
 ````markdown
-## Microsoft.Identity.ServiceEssentials.AspNetCore 2.0.1
-
-### net8.0
+## Aspire.Azure.Storage.Blobs 13.3.0-dev
 
 ```mermaid
 graph TD
-    AspNetCore["AspNetCore 2.0.1"]
-    AspNetCore --> Core["Core 2.0.1"]
-    AspNetCore --> AuthFP["Authentication.FirstParty 2.0.1"]
-    AspNetCore --> Foundation["Foundation 2.0.1"]
-    Core --> Config["Configuration 2.0.1"]
-    Core --> Caching["Caching 2.0.1"]
-    AspNetCore -.-> |">= 8.15.0"| Wilson["Microsoft.IdentityModel.*"]
-    AspNetCore -.-> |">= 4.2.0"| IdWeb["Microsoft.Identity.Web.*"]
-    AspNetCore -.-> |">= 8.0.0"| Extensions["Microsoft.Extensions.*"]
+    Aspire_Azure_Storage_Blobs["Aspire.Azure.Storage.Blobs 13.3.0-dev"]
+    Aspire_Azure_Storage_Blobs -.-> |">= 1.51.1"| Azure_star["Azure.*"]
+    Aspire_Azure_Storage_Blobs -.-> |">= 10.0.2"| Microsoft_Extensions_star["Microsoft.Extensions.*"]
+    Aspire_Azure_Storage_Blobs -.-> |">= 4.78.0"| Microsoft_Identity_star["Microsoft.Identity.*"]
+    Aspire_Azure_Storage_Blobs -.-> |">= 1.15.0"| OpenTelemetry_star["OpenTelemetry.*"]
+    Aspire_Azure_Storage_Blobs -.-> |">= 1.9.0"| System_star["System.*"]
 ```
-
-**1P packages (version managed by metapackage):**
-- Microsoft.Identity.ServiceEssentials.Core >= 2.0.1
-- Microsoft.Identity.ServiceEssentials.Authentication.FirstParty >= 2.0.1
-- Microsoft.Identity.ServiceEssentials.Foundation >= 2.0.1
 
 **External packages (pulled in transitively):**
-- Microsoft.IdentityModel.Abstractions >= 8.15.0
-- Microsoft.Identity.Web >= 4.2.0
-- Microsoft.Extensions.Caching.Abstractions >= 8.0.0
+- AspNetCore.HealthChecks.Azure.Storage.Blobs >= 9.0.0
+- Azure.Core >= 1.51.1
+- Azure.Identity >= 1.17.1
+- Azure.Storage.Blobs >= 12.26.0
+- Azure.Storage.Common >= 12.25.0
+- Microsoft.Extensions.Azure >= 1.13.1
+- Microsoft.Extensions.Configuration >= 10.0.2
+- Microsoft.Extensions.DependencyInjection >= 8.0.1
+- Microsoft.Extensions.Diagnostics.HealthChecks >= 8.0.23
+- Microsoft.Extensions.Hosting.Abstractions >= 10.0.2
+- Microsoft.Identity.Client >= 4.78.0
+- OpenTelemetry >= 1.15.0
+- OpenTelemetry.Extensions.Hosting >= 1.15.0
+- System.ClientModel >= 1.9.0
 ````
 
-### Public API
+### Public API (`public-api-net8.0.md` excerpt)
 
 ````markdown
-## Microsoft.Identity.ServiceEssentials.Core 2.0.1
-
-### net8.0
+## Aspire.Azure.Data.Tables 13.3.0-dev
 
 ```
-Microsoft.Identity.ServiceEssentials.AuthenticationTicket (class)
-Microsoft.Identity.ServiceEssentials.AuthenticationTicket.AuthenticationTicket(ClaimsIdentity, string) -> void
-Microsoft.Identity.ServiceEssentials.AuthenticationTicket.SubjectIdentity.get -> ClaimsIdentity
-Microsoft.Identity.ServiceEssentials.IMiseBuilder (interface)
-Microsoft.Identity.ServiceEssentials.IMiseBuilder.Services.get -> IServiceCollection
-Microsoft.Identity.ServiceEssentials.MiseAuthenticationDefaults (static class)
-Microsoft.Identity.ServiceEssentials.MiseAuthenticationDefaults.AuthenticationScheme -> string
+Aspire.Azure.Data.Tables.AzureDataTablesSettings (sealed class)
+Aspire.Azure.Data.Tables.AzureDataTablesSettings.AzureDataTablesSettings() -> void
+Aspire.Azure.Data.Tables.AzureDataTablesSettings.ConnectionString.get -> System.String
+Aspire.Azure.Data.Tables.AzureDataTablesSettings.ConnectionString.set -> void
+Aspire.Azure.Data.Tables.AzureDataTablesSettings.ServiceUri.get -> System.Uri
+Aspire.Azure.Data.Tables.AzureDataTablesSettings.ServiceUri.set -> void
+Microsoft.Extensions.Hosting.AspireTablesExtensions (static class)
 ```
 ````
 
@@ -158,22 +163,25 @@ Microsoft.Identity.ServiceEssentials.MiseAuthenticationDefaults.AuthenticationSc
 4. Runs `dotnet restore` with configured NuGet sources (including the input folder as a local source)
 5. Parses `obj/project.assets.json` for the complete resolved dependency tree
 6. Classifies packages as 1P or external based on `--1p-prefix` rules
-7. Generates Markdown with embedded Mermaid diagrams
+7. Generates one `dependencies-{tfm}.md` file per target framework with embedded Mermaid diagrams
 
 ### Public API extraction
 
-1. Extracts assemblies from `lib/<tfm>/` inside each `.nupkg`
+1. Extracts assemblies from `lib/<tfm>/` inside all `.nupkg` files into a shared reference folder
 2. Loads assemblies into `System.Reflection.MetadataLoadContext` (metadata-only, no code execution)
-3. Resolves type references using sibling DLLs and .NET reference assemblies
-4. Enumerates all public namespaces, types, and members
-5. Outputs in Roslyn `PublicAPI.Shipped.txt` format
+3. Resolves cross-package type references using sibling assemblies, .NET reference assemblies, and the NuGet global cache
+4. Handles version mismatches (e.g., placeholder versions like `42.42.42.42`) via name-based assembly resolution
+5. Falls back through compatible TFMs when a dependency only ships for a lower framework
+6. Enumerates all public namespaces, types, and members
+7. Generates one `public-api-{tfm}.md` file per target framework
 
 ## Use with AI agents
 
 The generated Markdown files are designed to be included in AI agent context:
-- As **GitHub Copilot skills** — drop the output in `.github/skills/`
+- As **GitHub Copilot skills** — drop the per-TFM files in `.github/skills/`
 - As **custom instructions** — reference in `.copilot-instructions.md`
 - As **agent context** — include in prompts for migration or upgrade tasks
+- One file per TFM keeps context window usage efficient — an agent working on `net8.0` only loads `dependencies-net8.0.md`
 
 ## CI/CD Integration
 
