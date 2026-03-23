@@ -334,6 +334,8 @@ public static class PublicApiAnalyzer
 
         foreach (var type in types.Where(t => t.IsPublic || t.IsNestedPublic))
         {
+            if (IsObsolete(type)) continue;
+
             var typeName = FormatTypeName(type);
             var typeKind = GetTypeKind(type);
             lines.Add($"{typeName} ({typeKind})");
@@ -343,6 +345,7 @@ public static class PublicApiAnalyzer
             {
                 foreach (var ctor in type.GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
                 {
+                    if (IsObsolete(ctor)) continue;
                     var parameters = FormatParameters(ctor.GetParameters());
                     lines.Add($"{typeName}.{type.Name}({parameters}) -> void");
                 }
@@ -354,6 +357,7 @@ public static class PublicApiAnalyzer
             {
                 foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
                 {
+                    if (IsObsolete(prop)) continue;
                     var propType = FormatTypeName(prop.PropertyType);
                     if (prop.GetGetMethod() != null)
                         lines.Add($"{typeName}.{prop.Name}.get -> {propType}");
@@ -369,6 +373,7 @@ public static class PublicApiAnalyzer
                 foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
                 {
                     if (method.IsSpecialName) continue; // Skip property/event accessors
+                    if (IsObsolete(method)) continue;
                     var parameters = FormatParameters(method.GetParameters());
                     var returnType = FormatTypeName(method.ReturnType);
                     var staticMod = method.IsStatic ? "static " : "";
@@ -382,6 +387,7 @@ public static class PublicApiAnalyzer
             {
                 foreach (var evt in type.GetEvents(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
                 {
+                    if (IsObsolete(evt)) continue;
                     var handlerType = evt.EventHandlerType != null ? FormatTypeName(evt.EventHandlerType) : "EventHandler";
                     lines.Add($"{typeName}.{evt.Name} -> {handlerType}");
                 }
@@ -394,6 +400,7 @@ public static class PublicApiAnalyzer
                 foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
                 {
                     if (field.Name.Contains("k__BackingField", StringComparison.Ordinal)) continue;
+                    if (IsObsolete(field)) continue;
                     var fieldType = FormatTypeName(field.FieldType);
                     var constMod = field.IsLiteral ? "const " : (field.IsStatic ? "static " : "");
                     lines.Add($"{constMod}{typeName}.{field.Name} -> {fieldType}");
@@ -441,6 +448,23 @@ public static class PublicApiAnalyzer
         if (type.IsAbstract) return "abstract class";
         if (type.IsSealed) return "sealed class";
         return "class";
+    }
+
+    /// <summary>
+    /// Checks if a member has the [Obsolete] attribute via CustomAttributeData
+    /// (works with MetadataLoadContext where normal attribute instantiation isn't available).
+    /// </summary>
+    private static bool IsObsolete(MemberInfo member)
+    {
+        try
+        {
+            return member.CustomAttributes.Any(a =>
+                a.AttributeType.FullName == "System.ObsoleteAttribute");
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
