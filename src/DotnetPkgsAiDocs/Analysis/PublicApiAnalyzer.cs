@@ -18,22 +18,35 @@ public static class PublicApiAnalyzer
         var sharedDir = Path.Combine(Path.GetTempPath(), "pkgs-ai-docs-api", $"shared-{tfm}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(sharedDir);
 
+        // Build list of compatible TFMs to try (exact match first, then fallbacks)
+        var compatibleTfms = GetCompatibleTfms(tfm);
+
         foreach (var nupkgPath in nupkgPaths)
         {
             try
             {
                 using var archive = ZipFile.OpenRead(nupkgPath);
-                var prefix = $"lib/{tfm}/";
-                var entries = archive.Entries
-                    .Where(e => e.FullName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                             && e.FullName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase));
 
-                foreach (var entry in entries)
+                // Try each compatible TFM in priority order, stop at first match
+                foreach (var candidateTfm in compatibleTfms)
                 {
-                    var destPath = Path.Combine(sharedDir, entry.Name);
-                    if (!File.Exists(destPath))
+                    var prefix = $"lib/{candidateTfm}/";
+                    var entries = archive.Entries
+                        .Where(e => e.FullName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                                 && e.FullName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+
+                    if (entries.Count > 0)
                     {
-                        entry.ExtractToFile(destPath);
+                        foreach (var entry in entries)
+                        {
+                            var destPath = Path.Combine(sharedDir, entry.Name);
+                            if (!File.Exists(destPath))
+                            {
+                                entry.ExtractToFile(destPath);
+                            }
+                        }
+                        break; // Found assemblies for this nupkg, don't try lower TFMs
                     }
                 }
             }
@@ -44,6 +57,37 @@ public static class PublicApiAnalyzer
         }
 
         return sharedDir;
+    }
+
+    /// <summary>
+    /// Returns a list of TFMs compatible with the requested one, in priority order.
+    /// e.g., net10.0 → [net10.0, net9.0, net8.0, netstandard2.1, netstandard2.0]
+    /// </summary>
+    private static List<string> GetCompatibleTfms(string tfm)
+    {
+        var result = new List<string> { tfm };
+
+        // For modern .NET (net5.0+), add lower versions as fallbacks
+        if (tfm.StartsWith("net") && !tfm.StartsWith("net4") && !tfm.StartsWith("netstandard")
+            && Version.TryParse(tfm[3..], out var version))
+        {
+            // Add lower major versions down to net8.0
+            for (var v = version.Major - 1; v >= 6; v--)
+            {
+                result.Add($"net{v}.0");
+            }
+            // Add netstandard fallbacks
+            result.Add("netstandard2.1");
+            result.Add("netstandard2.0");
+        }
+        else if (tfm.StartsWith("net4"))
+        {
+            // .NET Framework — add netstandard fallbacks
+            result.Add("netstandard2.0");
+            result.Add("netstandard1.6");
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -84,6 +128,9 @@ public static class PublicApiAnalyzer
                 }
             }
 
+            // NuGet global packages cache (for external deps not in the input folder)
+            AddNuGetCacheAssemblies(pathsByName, tfm);
+
             // Ref assemblies (override runtime)
             foreach (var refPath in GetReferenceAssemblyPaths(tfm))
             {
@@ -96,7 +143,7 @@ public static class PublicApiAnalyzer
                 pathsByName[Path.GetFileName(dll)] = dll;
             }
 
-            var resolver = new PathAssemblyResolver(pathsByName.Values);
+            var resolver = new NameMatchingAssemblyResolver(pathsByName);
             using var mlc = new MetadataLoadContext(resolver);
 
             var apiLines = new List<string>();
@@ -394,5 +441,94 @@ public static class PublicApiAnalyzer
         if (type.IsAbstract) return "abstract class";
         if (type.IsSealed) return "sealed class";
         return "class";
+    }
+
+    /// <summary>
+    /// Scans the NuGet global packages cache for assemblies matching a TFM
+    /// and adds them to the paths dictionary (low priority — existing entries not overwritten).
+    /// </summary>
+    private static void AddNuGetCacheAssemblies(Dictionary<string, string> pathsByName, string tfm)
+    {
+        var nugetCache = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".nuget", "packages");
+
+        if (!Directory.Exists(nugetCache)) return;
+
+        // Search for DLLs matching the TFM in the cache
+        // Structure: ~/.nuget/packages/{packageId}/{version}/lib/{tfm}/*.dll
+        try
+        {
+            foreach (var packageDir in Directory.GetDirectories(nugetCache))
+            {
+                // Get the latest version directory
+                var versionDirs = Directory.GetDirectories(packageDir);
+                if (versionDirs.Length == 0) continue;
+
+                var latestVersion = versionDirs
+                    .OrderByDescending(d => Path.GetFileName(d))
+                    .First();
+
+                var libTfmDir = Path.Combine(latestVersion, "lib", tfm);
+                if (Directory.Exists(libTfmDir))
+                {
+                    foreach (var dll in Directory.GetFiles(libTfmDir, "*.dll"))
+                    {
+                        var fileName = Path.GetFileName(dll);
+                        // Don't overwrite higher-priority entries
+                        if (!pathsByName.ContainsKey(fileName))
+                        {
+                            pathsByName[fileName] = dll;
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // NuGet cache scan is best-effort
+        }
+    }
+}
+
+/// <summary>
+/// Assembly resolver that matches by simple name (ignoring version, culture, public key token).
+/// This handles cases where assemblies reference each other with placeholder versions like 42.42.42.42.
+/// </summary>
+internal sealed class NameMatchingAssemblyResolver : MetadataAssemblyResolver
+{
+    private readonly Dictionary<string, string> _pathsByFileName;
+    private readonly Dictionary<string, string> _pathsBySimpleName;
+
+    public NameMatchingAssemblyResolver(Dictionary<string, string> pathsByFileName)
+    {
+        _pathsByFileName = pathsByFileName;
+
+        // Build a lookup by assembly simple name (without extension)
+        _pathsBySimpleName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kvp in pathsByFileName)
+        {
+            var simpleName = Path.GetFileNameWithoutExtension(kvp.Key);
+            // Keep the highest priority (last-added) entry
+            _pathsBySimpleName[simpleName] = kvp.Value;
+        }
+    }
+
+    public override Assembly? Resolve(MetadataLoadContext context, AssemblyName assemblyName)
+    {
+        // Try exact filename match first
+        var fileName = assemblyName.Name + ".dll";
+        if (_pathsByFileName.TryGetValue(fileName, out var path))
+        {
+            return context.LoadFromAssemblyPath(path);
+        }
+
+        // Try simple name match (handles version mismatches)
+        if (assemblyName.Name != null && _pathsBySimpleName.TryGetValue(assemblyName.Name, out var pathByName))
+        {
+            return context.LoadFromAssemblyPath(pathByName);
+        }
+
+        return null;
     }
 }
