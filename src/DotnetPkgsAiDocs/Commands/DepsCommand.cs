@@ -97,9 +97,10 @@ internal static class DepsCommand
         var prefixes = firstPartyPrefixes ?? [];
         if (format is "md" or "both")
         {
-            var mdPath = Path.Combine(outputFolder.FullName, "dependency-graph.md");
-            MarkdownWriter.WriteDependencyGraph(mdPath, allResults, prefixes);
-            Console.WriteLine($"\nMarkdown output: {mdPath}");
+            var files = MarkdownWriter.WriteDependencyGraphPerTfm(outputFolder.FullName, allResults, prefixes);
+            Console.WriteLine($"\nMarkdown output ({files.Count} files):");
+            foreach (var f in files)
+                Console.WriteLine($"  {f}");
         }
 
         if (format is "json" or "both")

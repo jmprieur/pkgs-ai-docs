@@ -27,17 +27,32 @@ public static class PublicApiAnalyzer
             }
 
             // Build the resolver paths: extracted assemblies + .NET ref assemblies
-            var resolverPaths = new List<string>(assemblies);
-            resolverPaths.AddRange(GetReferenceAssemblyPaths(tfm));
+            // Deduplicate by filename, preferring ref assemblies over runtime assemblies
+            var pathsByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            // Also add the running runtime's assemblies as fallback
+            // Add runtime assemblies first (lowest priority)
             var runtimeDir = Path.GetDirectoryName(typeof(object).Assembly.Location);
             if (runtimeDir != null)
             {
-                resolverPaths.AddRange(Directory.GetFiles(runtimeDir, "*.dll"));
+                foreach (var dll in Directory.GetFiles(runtimeDir, "*.dll"))
+                {
+                    pathsByName[Path.GetFileName(dll)] = dll;
+                }
             }
 
-            var resolver = new PathAssemblyResolver(resolverPaths.Distinct());
+            // Add ref assemblies (override runtime ones)
+            foreach (var refPath in GetReferenceAssemblyPaths(tfm))
+            {
+                pathsByName[Path.GetFileName(refPath)] = refPath;
+            }
+
+            // Add extracted assemblies (highest priority — these are what we're analyzing)
+            foreach (var asmPath in assemblies)
+            {
+                pathsByName[Path.GetFileName(asmPath)] = asmPath;
+            }
+
+            var resolver = new PathAssemblyResolver(pathsByName.Values);
             using var mlc = new MetadataLoadContext(resolver);
 
             var apiLines = new List<string>();

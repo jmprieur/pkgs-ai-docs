@@ -7,9 +7,10 @@ namespace DotnetPkgsAiDocs.Tests;
 public class MarkdownWriterTests
 {
     [Fact]
-    public void WriteDependencyGraph_ProducesValidMarkdown()
+    public void WriteDependencyGraphPerTfm_ProducesFilePerTfm()
     {
-        var tempFile = Path.GetTempFileName();
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
         try
         {
             var deps = new List<ResolvedDependency>
@@ -18,27 +19,32 @@ public class MarkdownWriterTests
             };
             var results = new List<DependencyResult>
             {
-                new("TestPackage", "1.0.0", "net8.0", deps)
+                new("TestPackage", "1.0.0", "net8.0", deps),
+                new("TestPackage", "1.0.0", "net9.0", deps)
             };
 
-            MarkdownWriter.WriteDependencyGraph(tempFile, results, []);
-            var content = File.ReadAllText(tempFile);
+            var files = MarkdownWriter.WriteDependencyGraphPerTfm(tempDir, results, []);
 
+            Assert.Equal(2, files.Count);
+            Assert.Contains(files, f => f.EndsWith("dependencies-net8.0.md"));
+            Assert.Contains(files, f => f.EndsWith("dependencies-net9.0.md"));
+
+            var content = File.ReadAllText(files.First(f => f.Contains("net8.0")));
             Assert.Contains("# Transitive Dependency Graph", content);
-            Assert.Contains("## TestPackage", content);
-            Assert.Contains("### net8.0", content);
+            Assert.Contains("## TestPackage 1.0.0", content);
             Assert.Contains("Microsoft.Extensions.Logging >= 8.0.0", content);
         }
         finally
         {
-            File.Delete(tempFile);
+            Directory.Delete(tempDir, recursive: true);
         }
     }
 
     [Fact]
-    public void WritePublicApi_ProducesValidMarkdown()
+    public void WritePublicApiPerTfm_ProducesFilePerTfm()
     {
-        var tempFile = Path.GetTempFileName();
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
         try
         {
             var results = new List<PublicApiResult>
@@ -46,9 +52,12 @@ public class MarkdownWriterTests
                 new("TestPackage", "1.0.0", "net8.0", new[] { "TestNamespace.TestClass (class)", "TestNamespace.TestClass.DoSomething() -> void" })
             };
 
-            MarkdownWriter.WritePublicApi(tempFile, results);
-            var content = File.ReadAllText(tempFile);
+            var files = MarkdownWriter.WritePublicApiPerTfm(tempDir, results);
 
+            Assert.Single(files);
+            Assert.Contains(files, f => f.EndsWith("public-api-net8.0.md"));
+
+            var content = File.ReadAllText(files[0]);
             Assert.Contains("# Public API Surface", content);
             Assert.Contains("## TestPackage 1.0.0", content);
             Assert.Contains("TestNamespace.TestClass (class)", content);
@@ -56,7 +65,7 @@ public class MarkdownWriterTests
         }
         finally
         {
-            File.Delete(tempFile);
+            Directory.Delete(tempDir, recursive: true);
         }
     }
 }

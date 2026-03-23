@@ -69,9 +69,10 @@ internal static class ApiCommand
 
         if (format is "md" or "both")
         {
-            var mdPath = Path.Combine(outputFolder.FullName, "public-api.md");
-            MarkdownWriter.WritePublicApi(mdPath, allResults);
-            Console.WriteLine($"\nMarkdown output: {mdPath}");
+            var files = MarkdownWriter.WritePublicApiPerTfm(outputFolder.FullName, allResults);
+            Console.WriteLine($"\nMarkdown output ({files.Count} files):");
+            foreach (var f in files)
+                Console.WriteLine($"  {f}");
         }
 
         if (format is "json" or "both")

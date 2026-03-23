@@ -99,7 +99,7 @@ public static class TransitiveDepsResolver
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = "restore --no-build --verbosity quiet",
+            Arguments = "restore --verbosity quiet",
             WorkingDirectory = workingDir,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
