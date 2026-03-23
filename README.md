@@ -81,15 +81,24 @@ dotnet-pkgs-ai-docs all ./packages/ -o ./output/
 | `--format` | Output format: `md`, `json`, or `both` | `md` |
 | `--1p-prefix` | Package ID prefix(es) to classify as first-party | _(none)_ |
 
+> **Important for private/internal packages:** If your `.nupkg` files depend on other packages
+> from private feeds (e.g., Azure DevOps Artifacts), pass `--source` with the feed URL.
+> Without it, `dotnet restore` can't resolve transitive dependencies.
+
 ### Custom NuGet sources
 
-If your packages depend on packages from private feeds:
+If your packages depend on packages from private feeds, **you must pass `--source`** so transitive
+dependencies can be resolved. The deps command populates the NuGet global cache, which the API
+command then uses for assembly resolution.
 
 ```bash
-dotnet-pkgs-ai-docs deps ./packages/ -o ./output/ \
+dotnet-pkgs-ai-docs all ./packages/ -o ./output/ \
   --source https://pkgs.dev.azure.com/myorg/_packaging/myfeed/nuget/v3/index.json \
   --source https://api.nuget.org/v3/index.json
 ```
+
+> **Tip:** Always include `https://api.nuget.org/v3/index.json` alongside private sources,
+> since packages often depend on public NuGet packages too.
 
 ### First-party classification
 
@@ -172,8 +181,9 @@ Microsoft.Extensions.Hosting.AspireTablesExtensions (static class)
 3. Resolves cross-package type references using sibling assemblies, .NET reference assemblies, and the NuGet global cache
 4. Handles version mismatches (e.g., placeholder versions like `42.42.42.42`) via name-based assembly resolution
 5. Falls back through compatible TFMs when a dependency only ships for a lower framework
-6. Enumerates all public namespaces, types, and members
-7. Generates one `public-api-{tfm}.md` file per target framework
+6. Excludes types and members marked with `[Obsolete]`
+7. Enumerates all public namespaces, types, and members
+8. Generates one `public-api-{tfm}.md` file per target framework
 
 ## Use with AI agents
 

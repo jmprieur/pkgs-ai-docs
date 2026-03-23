@@ -118,14 +118,20 @@ public static class TransitiveDepsResolver
 
         if (process.ExitCode != 0)
         {
-            // Only show details on failure
-            if (!string.IsNullOrWhiteSpace(stderr))
+            // Show restore error details
+            var errorOutput = !string.IsNullOrWhiteSpace(stderr) ? stderr : stdout;
+            if (!string.IsNullOrWhiteSpace(errorOutput))
             {
-                // Trim to first few lines to avoid noise
-                var lines = stderr.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                foreach (var line in lines.Take(5))
+                var lines = errorOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                    .Where(l => l.Contains("error", StringComparison.OrdinalIgnoreCase)
+                             || l.Contains("not found", StringComparison.OrdinalIgnoreCase)
+                             || l.Contains("unable to", StringComparison.OrdinalIgnoreCase))
+                    .Take(3)
+                    .ToList();
+
+                foreach (var line in lines)
                 {
-                    Console.Error.WriteLine($"    {line.Trim()}");
+                    Console.Error.WriteLine($"      {line.Trim()}");
                 }
             }
             return false;

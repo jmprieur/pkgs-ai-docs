@@ -143,12 +143,13 @@ public static class NupkgExtractor
     /// </summary>
     private static string NormalizeTfm(string tfm)
     {
-        // Already short form
-        if (tfm.StartsWith("net", StringComparison.OrdinalIgnoreCase) && !tfm.Contains(','))
+        // Already short form (net8.0, net462, netstandard2.0, etc.)
+        if (tfm.StartsWith("net", StringComparison.OrdinalIgnoreCase) && !tfm.Contains(',')
+            && !tfm.StartsWith(".NET", StringComparison.Ordinal))
             return tfm.ToLowerInvariant();
 
-        // Long form: .NETFramework,Version=v4.6.2
-        if (tfm.StartsWith(".NETFramework", StringComparison.OrdinalIgnoreCase))
+        // Long form with comma: .NETFramework,Version=v4.6.2
+        if (tfm.StartsWith(".NETFramework", StringComparison.OrdinalIgnoreCase) && tfm.Contains("Version=v"))
         {
             var versionPart = tfm.Split("Version=v", StringSplitOptions.None);
             if (versionPart.Length == 2)
@@ -157,8 +158,15 @@ public static class NupkgExtractor
             }
         }
 
-        // Long form: .NETCoreApp,Version=v8.0
-        if (tfm.StartsWith(".NETCoreApp", StringComparison.OrdinalIgnoreCase))
+        // Short form without comma but with .NETFramework prefix: .NETFramework4.6.2
+        if (tfm.StartsWith(".NETFramework", StringComparison.OrdinalIgnoreCase) && !tfm.Contains(','))
+        {
+            var version = tfm[".NETFramework".Length..];
+            return "net" + version.Replace(".", "");
+        }
+
+        // Long form with comma: .NETCoreApp,Version=v8.0
+        if (tfm.StartsWith(".NETCoreApp", StringComparison.OrdinalIgnoreCase) && tfm.Contains("Version=v"))
         {
             var versionPart = tfm.Split("Version=v", StringSplitOptions.None);
             if (versionPart.Length == 2)
@@ -167,14 +175,28 @@ public static class NupkgExtractor
             }
         }
 
-        // Long form: .NETStandard,Version=v2.0
-        if (tfm.StartsWith(".NETStandard", StringComparison.OrdinalIgnoreCase))
+        // Short form: .NETCoreApp8.0
+        if (tfm.StartsWith(".NETCoreApp", StringComparison.OrdinalIgnoreCase) && !tfm.Contains(','))
+        {
+            var version = tfm[".NETCoreApp".Length..];
+            return "net" + version;
+        }
+
+        // Long form with comma: .NETStandard,Version=v2.0
+        if (tfm.StartsWith(".NETStandard", StringComparison.OrdinalIgnoreCase) && tfm.Contains("Version=v"))
         {
             var versionPart = tfm.Split("Version=v", StringSplitOptions.None);
             if (versionPart.Length == 2)
             {
                 return "netstandard" + versionPart[1];
             }
+        }
+
+        // Short form: .NETStandard2.0
+        if (tfm.StartsWith(".NETStandard", StringComparison.OrdinalIgnoreCase) && !tfm.Contains(','))
+        {
+            var version = tfm[".NETStandard".Length..];
+            return "netstandard" + version;
         }
 
         return tfm.ToLowerInvariant();
