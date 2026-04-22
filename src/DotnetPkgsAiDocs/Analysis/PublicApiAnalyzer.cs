@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Reflection;
 
@@ -93,8 +94,9 @@ public static class PublicApiAnalyzer
     /// <summary>
     /// Analyzes a specific TFM inside a .nupkg and returns the public API surface.
     /// Uses the sharedRefDir for cross-package assembly resolution.
+    /// Optionally uses restoredPackagesDir for external dependency resolution.
     /// </summary>
-    public static PublicApiResult? Analyze(string nupkgPath, PackageInfo packageInfo, string tfm, string sharedRefDir)
+    public static PublicApiResult? Analyze(string nupkgPath, PackageInfo packageInfo, string tfm, string sharedRefDir, string? restoredPackagesDir = null)
     {
         try
         {
@@ -130,6 +132,12 @@ public static class PublicApiAnalyzer
 
             // NuGet global packages cache (for external deps not in the input folder)
             AddNuGetCacheAssemblies(pathsByName, tfm);
+
+            // Restored external dependencies (from pre-restore step)
+            if (restoredPackagesDir != null)
+            {
+                AddRestoredPackageAssemblies(pathsByName, restoredPackagesDir, tfm);
+            }
 
             // Ref assemblies (override runtime)
             foreach (var refPath in GetReferenceAssemblyPaths(tfm))
@@ -361,22 +369,22 @@ public static class PublicApiAnalyzer
             lines.Add($"{typeName} ({typeKind})");
 
             // Constructors
-            try
+            foreach (var ctor in GetMembersSafe(() => type.GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)))
             {
-                foreach (var ctor in type.GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                try
                 {
                     if (IsObsolete(ctor)) continue;
                     var parameters = FormatParameters(ctor.GetParameters());
                     var ctorName = StripGenericArity(type.Name);
                     lines.Add($"{typeName}.{ctorName}({parameters}) -> void");
                 }
+                catch { /* skip individual member on error */ }
             }
-            catch { /* skip on error */ }
 
             // Properties
-            try
+            foreach (var prop in GetMembersSafe(() => type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)))
             {
-                foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+                try
                 {
                     if (IsObsolete(prop)) continue;
                     var propType = FormatTypeName(prop.PropertyType);
@@ -385,13 +393,13 @@ public static class PublicApiAnalyzer
                     if (prop.GetSetMethod() != null)
                         lines.Add($"{typeName}.{prop.Name}.set -> void");
                 }
+                catch { /* skip individual member on error */ }
             }
-            catch { /* skip on error */ }
 
             // Methods (excluding property accessors and event accessors)
-            try
+            foreach (var method in GetMembersSafe(() => type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)))
             {
-                foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+                try
                 {
                     if (method.IsSpecialName) continue; // Skip property/event accessors
                     if (IsObsolete(method)) continue;
@@ -400,25 +408,25 @@ public static class PublicApiAnalyzer
                     var staticMod = method.IsStatic ? "static " : "";
                     lines.Add($"{staticMod}{typeName}.{method.Name}({parameters}) -> {returnType}");
                 }
+                catch { /* skip individual member on error */ }
             }
-            catch { /* skip on error */ }
 
             // Events
-            try
+            foreach (var evt in GetMembersSafe(() => type.GetEvents(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)))
             {
-                foreach (var evt in type.GetEvents(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+                try
                 {
                     if (IsObsolete(evt)) continue;
                     var handlerType = evt.EventHandlerType != null ? FormatTypeName(evt.EventHandlerType) : "EventHandler";
                     lines.Add($"{typeName}.{evt.Name} -> {handlerType}");
                 }
+                catch { /* skip individual member on error */ }
             }
-            catch { /* skip on error */ }
 
             // Fields (public, non-backing)
-            try
+            foreach (var field in GetMembersSafe(() => type.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)))
             {
-                foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly))
+                try
                 {
                     if (field.Name.Contains("k__BackingField", StringComparison.Ordinal)) continue;
                     if (field.Name == "value__" && type.IsEnum) continue;
@@ -427,11 +435,27 @@ public static class PublicApiAnalyzer
                     var constMod = field.IsLiteral ? "const " : (field.IsStatic ? "static " : "");
                     lines.Add($"{constMod}{typeName}.{field.Name} -> {fieldType}");
                 }
+                catch { /* skip individual member on error */ }
             }
-            catch { /* skip on error */ }
         }
 
         return lines;
+    }
+
+    /// <summary>
+    /// Safely retrieves members from a type, returning an empty array if the reflection call throws.
+    /// This prevents a single unresolvable base type from killing all member enumeration.
+    /// </summary>
+    private static T[] GetMembersSafe<T>(Func<T[]> getter) where T : MemberInfo
+    {
+        try
+        {
+            return getter();
+        }
+        catch
+        {
+            return [];
+        }
     }
 
     /// <summary>
@@ -548,21 +572,26 @@ public static class PublicApiAnalyzer
                 // Try each compatible TFM in priority order
                 foreach (var candidateTfm in compatibleTfms)
                 {
-                    var libTfmDir = Path.Combine(latestVersion, "lib", candidateTfm);
-                    if (Directory.Exists(libTfmDir))
+                    // Check ref/ first (better for MetadataLoadContext), then lib/
+                    foreach (var folder in new[] { "ref", "lib" })
                     {
-                        foreach (var dll in Directory.GetFiles(libTfmDir, "*.dll"))
+                        var tfmDir = Path.Combine(latestVersion, folder, candidateTfm);
+                        if (Directory.Exists(tfmDir))
                         {
-                            var fileName = Path.GetFileName(dll);
-                            // Don't overwrite higher-priority entries
-                            if (!pathsByName.ContainsKey(fileName))
+                            foreach (var dll in Directory.GetFiles(tfmDir, "*.dll"))
                             {
-                                pathsByName[fileName] = dll;
+                                var fileName = Path.GetFileName(dll);
+                                // Don't overwrite higher-priority entries
+                                if (!pathsByName.ContainsKey(fileName))
+                                {
+                                    pathsByName[fileName] = dll;
+                                }
                             }
+                            goto nextPackage; // Found assemblies for this package
                         }
-                        break; // Found assemblies for this package, don't try lower TFMs
                     }
                 }
+                nextPackage:;
             }
         }
         catch
@@ -570,6 +599,163 @@ public static class PublicApiAnalyzer
             // NuGet cache scan is best-effort
         }
     }
+
+    /// <summary>
+    /// Restores all external dependencies to a temp packages folder so MetadataLoadContext
+    /// can resolve them during API extraction. Returns the packages folder path, or null on failure.
+    /// </summary>
+    public static async Task<string?> RestoreExternalDependenciesAsync(
+        IReadOnlyList<PackageInfo> packages,
+        IReadOnlyList<string> tfms,
+        IReadOnlyList<string> nugetSources)
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "pkgs-ai-docs-api", $"restore-{Guid.NewGuid():N}");
+        var packagesDir = Path.Combine(tempDir, "packages");
+
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+
+            // Create nuget.config
+            var nugetConfigPath = Path.Combine(tempDir, "nuget.config");
+            using (var writer = new StreamWriter(nugetConfigPath))
+            {
+                writer.WriteLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+                writer.WriteLine("<configuration>");
+                writer.WriteLine("  <packageSources>");
+                writer.WriteLine("    <clear />");
+                for (var i = 0; i < nugetSources.Count; i++)
+                {
+                    var source = nugetSources[i];
+                    var name = Directory.Exists(source) ? $"local-{i}" : $"remote-{i}";
+                    writer.WriteLine($"    <add key=\"{name}\" value=\"{EscapeXml(source)}\" />");
+                }
+                writer.WriteLine("  </packageSources>");
+                writer.WriteLine("</configuration>");
+            }
+
+            // Create a temp project per TFM, restore each, accumulate packages
+            foreach (var tfm in tfms)
+            {
+                var tfmPackages = packages
+                    .Where(p => p.TargetFrameworks.Contains(tfm, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (tfmPackages.Count == 0) continue;
+
+                var csprojPath = Path.Combine(tempDir, $"resolve-{tfm}.csproj");
+                using (var writer = new StreamWriter(csprojPath))
+                {
+                    writer.WriteLine("<Project Sdk=\"Microsoft.NET.Sdk\">");
+                    writer.WriteLine("  <PropertyGroup>");
+                    writer.WriteLine($"    <TargetFramework>{tfm}</TargetFramework>");
+                    writer.WriteLine("    <OutputType>Library</OutputType>");
+                    writer.WriteLine($"    <RestorePackagesPath>{EscapeXml(packagesDir)}</RestorePackagesPath>");
+                    writer.WriteLine("    <NoWarn>NU1701;NU1603;NU1605</NoWarn>");
+                    writer.WriteLine("  </PropertyGroup>");
+                    writer.WriteLine("  <ItemGroup>");
+
+                    // Deduplicate by package ID (keep first occurrence)
+                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var pkg in tfmPackages)
+                    {
+                        if (seen.Add(pkg.Id))
+                        {
+                            writer.WriteLine($"    <PackageReference Include=\"{EscapeXml(pkg.Id)}\" Version=\"{EscapeXml(pkg.Version)}\" />");
+                        }
+                    }
+
+                    writer.WriteLine("  </ItemGroup>");
+                    writer.WriteLine("</Project>");
+                }
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "dotnet",
+                    Arguments = "restore --verbosity quiet",
+                    WorkingDirectory = tempDir,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(psi);
+                if (process == null) continue;
+
+                await process.StandardOutput.ReadToEndAsync();
+                await process.StandardError.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                // Clean up the csproj so it doesn't interfere with next TFM
+                try { File.Delete(csprojPath); } catch { }
+                var objDir = Path.Combine(tempDir, "obj");
+                try { if (Directory.Exists(objDir)) Directory.Delete(objDir, recursive: true); } catch { }
+            }
+
+            if (Directory.Exists(packagesDir))
+                return packagesDir;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  Warning: External dependency restore failed: {ex.Message}");
+        }
+
+        // Clean up on failure
+        try { Directory.Delete(tempDir, recursive: true); } catch { }
+        return null;
+    }
+
+    /// <summary>
+    /// Scans a restored packages folder for assemblies matching a TFM
+    /// and adds them to the paths dictionary.
+    /// Structure: {packagesDir}/{packageId}/{version}/ref|lib/{tfm}/*.dll
+    /// </summary>
+    private static void AddRestoredPackageAssemblies(Dictionary<string, string> pathsByName, string packagesDir, string tfm)
+    {
+        if (!Directory.Exists(packagesDir)) return;
+
+        var compatibleTfms = GetCompatibleTfms(tfm);
+
+        try
+        {
+            foreach (var packageDir in Directory.GetDirectories(packagesDir))
+            {
+                var versionDirs = Directory.GetDirectories(packageDir);
+                if (versionDirs.Length == 0) continue;
+
+                var latestVersion = SortDirectoriesByVersionDescending(versionDirs).First();
+
+                foreach (var candidateTfm in compatibleTfms)
+                {
+                    foreach (var folder in new[] { "ref", "lib" })
+                    {
+                        var tfmDir = Path.Combine(latestVersion, folder, candidateTfm);
+                        if (Directory.Exists(tfmDir))
+                        {
+                            foreach (var dll in Directory.GetFiles(tfmDir, "*.dll"))
+                            {
+                                var fileName = Path.GetFileName(dll);
+                                if (!pathsByName.ContainsKey(fileName))
+                                {
+                                    pathsByName[fileName] = dll;
+                                }
+                            }
+                            goto nextRestoredPackage;
+                        }
+                    }
+                }
+                nextRestoredPackage:;
+            }
+        }
+        catch
+        {
+            // Restored packages scan is best-effort
+        }
+    }
+
+    private static string EscapeXml(string value) =>
+        value.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
 }
 
 /// <summary>

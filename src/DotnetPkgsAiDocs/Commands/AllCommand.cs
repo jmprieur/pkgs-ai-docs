@@ -38,6 +38,6 @@ internal static class AllCommand
         await DepsCommand.ExecuteAsync(inputFolder, outputFolder, nugetSources, firstPartyPrefixes, format);
 
         Console.WriteLine("\n=== Public API Surface ===\n");
-        await ApiCommand.ExecuteAsync(inputFolder, outputFolder, format);
+        await ApiCommand.ExecuteAsync(inputFolder, outputFolder, nugetSources, format);
     }
 }

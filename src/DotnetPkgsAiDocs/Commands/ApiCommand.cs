@@ -15,11 +15,13 @@ internal static class ApiCommand
 
         command.AddArgument(CommonOptions.InputFolder);
         command.AddOption(CommonOptions.OutputFolder);
+        command.AddOption(CommonOptions.NuGetSources);
         command.AddOption(CommonOptions.Format);
 
         command.SetHandler(ExecuteAsync,
             CommonOptions.InputFolder,
             CommonOptions.OutputFolder,
+            CommonOptions.NuGetSources,
             CommonOptions.Format);
 
         return command;
@@ -28,6 +30,7 @@ internal static class ApiCommand
     internal static async Task ExecuteAsync(
         DirectoryInfo inputFolder,
         DirectoryInfo outputFolder,
+        string[]? nugetSources,
         string format)
     {
         if (!inputFolder.Exists)
@@ -70,55 +73,83 @@ internal static class ApiCommand
 
         Console.WriteLine($"Target frameworks found: {string.Join(", ", allTfms)}");
 
-        var allResults = new List<PublicApiResult>();
+        // Pre-restore external dependencies so MetadataLoadContext can resolve them
+        var sources = new List<string> { inputFolder.FullName };
+        if (nugetSources != null)
+            sources.AddRange(nugetSources);
+        sources.Add("https://api.nuget.org/v3/index.json");
 
-        // Process per TFM: extract all assemblies once, then analyze each package
-        foreach (var tfm in allTfms)
+        string? restoredPackagesDir = null;
+        try
         {
-            Console.WriteLine($"\n  Extracting all assemblies for {tfm}...");
-            var sharedRefDir = PublicApiAnalyzer.ExtractAllAssembliesForTfm(nupkgPaths, tfm);
-
-            try
+            Console.WriteLine("\n  Restoring external dependencies for API resolution...");
+            restoredPackagesDir = await PublicApiAnalyzer.RestoreExternalDependenciesAsync(packages.Select(p => p.info).ToList(), allTfms, sources);
+            if (restoredPackagesDir != null)
             {
-                var dllCount = Directory.GetFiles(sharedRefDir, "*.dll").Length;
-                Console.WriteLine($"  {dllCount} assemblies available for resolution");
+                Console.WriteLine($"  External dependencies restored to temp folder.");
+            }
+            else
+            {
+                Console.Error.WriteLine("  Warning: Could not restore external dependencies. Some APIs may be incomplete.");
+            }
 
-                foreach (var (nupkg, info) in packages)
+            var allResults = new List<PublicApiResult>();
+
+            // Process per TFM: extract all assemblies once, then analyze each package
+            foreach (var tfm in allTfms)
+            {
+                Console.WriteLine($"\n  Extracting all assemblies for {tfm}...");
+                var sharedRefDir = PublicApiAnalyzer.ExtractAllAssembliesForTfm(nupkgPaths, tfm);
+
+                try
                 {
-                    if (!info.TargetFrameworks.Contains(tfm, StringComparer.OrdinalIgnoreCase))
-                        continue;
+                    var dllCount = Directory.GetFiles(sharedRefDir, "*.dll").Length;
+                    Console.WriteLine($"  {dllCount} assemblies available for resolution");
 
-                    Console.WriteLine($"    Extracting API: {info.Id} {info.Version} -> {tfm}...");
-                    var result = PublicApiAnalyzer.Analyze(nupkg.FullName, info, tfm, sharedRefDir);
-                    if (result != null)
+                    foreach (var (nupkg, info) in packages)
                     {
-                        allResults.Add(result);
+                        if (!info.TargetFrameworks.Contains(tfm, StringComparer.OrdinalIgnoreCase))
+                            continue;
+
+                        Console.WriteLine($"    Extracting API: {info.Id} {info.Version} -> {tfm}...");
+                        var result = PublicApiAnalyzer.Analyze(nupkg.FullName, info, tfm, sharedRefDir, restoredPackagesDir);
+                        if (result != null)
+                        {
+                            allResults.Add(result);
+                        }
                     }
                 }
+                finally
+                {
+                    try { Directory.Delete(sharedRefDir, recursive: true); }
+                    catch { /* best effort cleanup */ }
+                }
             }
-            finally
+
+            if (format is "md" or "both")
             {
-                try { Directory.Delete(sharedRefDir, recursive: true); }
+                var files = MarkdownWriter.WritePublicApiPerTfm(outputFolder.FullName, allResults);
+                Console.WriteLine($"\nMarkdown output ({files.Count} files):");
+                foreach (var f in files)
+                    Console.WriteLine($"  {f}");
+            }
+
+            if (format is "json" or "both")
+            {
+                var jsonPath = Path.Combine(outputFolder.FullName, "public-api.json");
+                JsonWriter.WritePublicApi(jsonPath, allResults);
+                Console.WriteLine($"JSON output: {jsonPath}");
+            }
+
+            Console.WriteLine("Done.");
+        }
+        finally
+        {
+            if (restoredPackagesDir != null)
+            {
+                try { Directory.Delete(restoredPackagesDir, recursive: true); }
                 catch { /* best effort cleanup */ }
             }
         }
-
-        if (format is "md" or "both")
-        {
-            var files = MarkdownWriter.WritePublicApiPerTfm(outputFolder.FullName, allResults);
-            Console.WriteLine($"\nMarkdown output ({files.Count} files):");
-            foreach (var f in files)
-                Console.WriteLine($"  {f}");
-        }
-
-        if (format is "json" or "both")
-        {
-            var jsonPath = Path.Combine(outputFolder.FullName, "public-api.json");
-            JsonWriter.WritePublicApi(jsonPath, allResults);
-            Console.WriteLine($"JSON output: {jsonPath}");
-        }
-
-        Console.WriteLine("Done.");
-        await Task.CompletedTask;
     }
 }
